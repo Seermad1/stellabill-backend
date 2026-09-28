@@ -577,3 +577,94 @@ describe('Token integration with createStellarBillClient', () => {
     expect(sdk1.getToken()).toBeUndefined();
   });
 });
+
+// ════════════════════════════════════════════════════════════════════
+//  validateBaseUrl boundary coverage (sdks/ts/src/client.ts:93)
+//
+//  The single `throw new StellarBillConfigError(`baseUrl "${raw}" is not a
+//  valid URL`)` is the gate every SDK instance passes through. These tests
+//  pin which inputs fall on which side of that gate, that the raw value is
+//  echoed back in the message, and that the surrounding whitespace /
+//  trailing-slash normalisation cannot silently change the request URL.
+// ════════════════════════════════════════════════════════════════════
+describe('validateBaseUrl boundary (client.ts:93)', () => {
+  it('requires a value: undefined and null both raise "baseUrl is required"', () => {
+    expect(() => createStellarBillClient({ baseUrl: undefined as unknown as string })).toThrow(
+      /baseUrl is required/,
+    )
+    expect(() => createStellarBillClient({ baseUrl: null as unknown as string })).toThrow(
+      /baseUrl is required/,
+    )
+  })
+
+  it('rejects non-string baseUrl values before the URL parser is reached', () => {
+    const nonStrings: unknown[] = [123, 0, true, false, {}, [], () => {}, Symbol('x')]
+    for (const bad of nonStrings) {
+      expect(() => createStellarBillClient({ baseUrl: bad as string })).toThrow(
+        /baseUrl must be a non-empty string/,
+      )
+    }
+  })
+
+  it('rejects whitespace-only baseUrl values as non-empty-string violations', () => {
+    for (const blank of ['', '   ', '\t', '\n', ' \t\n ']) {
+      expect(() => createStellarBillClient({ baseUrl: blank })).toThrow(StellarBillConfigError)
+      expect(() => createStellarBillClient({ baseUrl: blank })).toThrow(/non-empty string/)
+    }
+  })
+
+  it('routes scheme-less inputs through the "not a valid URL" branch', () => {
+    for (const raw of [
+      'api.example.com',
+      '//api.example.com',
+      'example.com/webhook',
+      'not-a-url',
+    ]) {
+      expect(() => createStellarBillClient({ baseUrl: raw })).toThrow(StellarBillConfigError)
+      expect(() => createStellarBillClient({ baseUrl: raw })).toThrow(/is not a valid URL/)
+    }
+  })
+
+  it('echoes the offending raw value verbatim in the error message', () => {
+    expect(() => createStellarBillClient({ baseUrl: 'not a url at all' })).toThrow(
+      'baseUrl "not a url at all" is not a valid URL',
+    )
+  })
+
+  it('rejects syntactically invalid URLs that still look like URLs', () => {
+    for (const raw of [
+      'https://',
+      'https://api.example.com:99999', // port out of range
+      'https://exa mple.com',
+      'http://[::1', // unterminated IPv6 host
+    ]) {
+      expect(() => createStellarBillClient({ baseUrl: raw })).toThrow(/is not a valid URL/)
+    }
+  })
+
+  it('accepts a valid URL wrapped in surrounding whitespace and normalises it', async () => {
+    const { fetch, calls } = mockFetchOnce({ status: 'ok', service: 'stellarbill-backend' })
+    const sdk = createStellarBillClient({ baseUrl: '   https://api.example.com///   ', fetch })
+    await sdk.getHealth()
+    expect(calls[0]!.url).toBe('https://api.example.com/api/health')
+  })
+
+  it('strips arbitrarily long trailing-slash runs while preserving the port', async () => {
+    const { fetch, calls } = mockFetchOnce({ status: 'ok', service: 'stellarbill-backend' })
+    const sdk = createStellarBillClient({ baseUrl: 'http://127.0.0.1:8080////', fetch })
+    await sdk.getHealth()
+    expect(calls[0]!.url).toBe('http://127.0.0.1:8080/api/health')
+  })
+
+  it('does not throw at construction for a valid non-http scheme (accepted by URL)', () => {
+    const dummyFetch = (async () => new Response('{}', { status: 200 })) as typeof fetch
+    expect(() => createStellarBillClient({ baseUrl: 'ftp://example.com', fetch: dummyFetch })).not.toThrow()
+  })
+
+  it('treats IPv6 loopback as non-localhost, so the insecure-transport warning still fires', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { fetch } = mockFetchOnce({ status: 'ok', service: 'stellarbill-backend' })
+    createStellarBillClient({ baseUrl: 'http://[::1]:8080', fetch })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Insecure baseUrl'))
+  })
+})
